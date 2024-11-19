@@ -1,38 +1,6 @@
 use anyhow::bail;
 use windows::Win32::Globalization::*;
-use windows::{core::Result, Win32::System::Threading::*};
 use windows::{core::*, Win32::System::Com::*};
-
-static COUNTER: std::sync::RwLock<i32> = std::sync::RwLock::new(0);
-
-extern "system" fn callback(_: PTP_CALLBACK_INSTANCE, _: *mut std::ffi::c_void, _: PTP_WORK) {
-    let mut counter = COUNTER.write().unwrap();
-    *counter += 1;
-}
-
-fn callback_example() -> Result<()> {
-    unsafe {
-        let work = CreateThreadpoolWork(Some(callback), None, None)?;
-        for _ in 0..10 {
-            SubmitThreadpoolWork(work);
-        }
-        WaitForThreadpoolWorkCallbacks(work, false);
-
-        com_example()?;
-    }
-    println!("counter: {}", COUNTER.read().unwrap());
-    Ok(())
-}
-
-fn com_example() -> Result<()> {
-    unsafe {
-        let uri = CreateUri(w!("http://kennykerr.ca"), Uri_CREATE_CANONICALIZE, 0)?;
-        let domain = uri.GetDomain()?;
-        let port = uri.GetPort()?;
-        println!("{domain} ({port})");
-    }
-    Ok(())
-}
 
 struct SpellClient {
     spell_checker: ISpellChecker,
@@ -70,18 +38,32 @@ impl SpellClient {
 
     fn suggest(&self, word: &str) -> anyhow::Result<Vec<String>> {
         let word = HSTRING::from(word);
+        let mut suggestions = vec![];
         unsafe {
-            let suggestions = self.spell_checker.Suggest(&word)?;
-            todo!();
+            let enum_string = self.spell_checker.Suggest(&word)?;
+
+            loop {
+                // Get the next suggestion breaking if the call to `Next` failed
+                let mut wstring_pointers = [PWSTR::null()];
+                _ = enum_string.Next(&mut wstring_pointers, None);
+                if wstring_pointers[0].is_null() {
+                    break;
+                }
+
+                let as_string = wstring_pointers[0].to_string()?;
+                suggestions.push(as_string);
+
+                CoTaskMemFree(Some(wstring_pointers[0].as_ptr() as *mut _));
+            }
         }
-        Ok(vec![])
+        Ok(suggestions)
     }
 }
 
 fn main() -> anyhow::Result<()> {
-    let _ = unsafe {
-        CoIncrementMTAUsage()?;
-    };
+    unsafe {
+        CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
+    }
     let args: Vec<_> = std::env::args().collect();
     let lang = &args[1];
     let word = &args[2];
